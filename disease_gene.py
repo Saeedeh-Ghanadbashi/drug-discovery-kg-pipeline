@@ -1,8 +1,8 @@
 from pykeen.pipeline import pipeline
 from pykeen.triples import TriplesFactory
-from pykeen import predict  # Correct import
 import numpy as np
 import pandas as pd
+import torch
 
 # Create a more comprehensive dataset for drug discovery
 triples = [
@@ -53,13 +53,13 @@ result = pipeline(
     validation=validation,
     model="TransE",
     training_kwargs=dict(
-        num_epochs=300,  # More epochs for better convergence
+        num_epochs=100,
         batch_size=32
     ),
     model_kwargs=dict(
-        embedding_dim=50  # Dimension of embeddings
+        embedding_dim=50
     ),
-    random_seed=42  # For reproducibility
+    random_seed=42
 )
 
 # Print evaluation results
@@ -67,34 +67,10 @@ print("\nEvaluation Results:")
 print(f"Mean Rank: {result.metric_results.get_metric('mean_rank')}")
 print(f"Hits@10: {result.metric_results.get_metric('hits_at_10')}")
 
-# Get predictions for BRCA1 gene associations using the correct function
-print("\nPredicted disease associations for BRCA1:")
-try:
-    # Method 1: Using the predict module (for newer versions)
-    pred_df = predict.get_tail_prediction_df(
-        result.model,
-        head_label="BRCA1",
-        relation_label="associated_with",
-        triples_factory=result.training,
-        add_novelties=True
-    )
-except AttributeError:
-    # Method 2: Alternative approach if the above doesn't work
-    from pykeen.predict import predict_target
-    predictions = predict_target(
-        model=result.model,
-        head="BRCA1",
-        relation="associated_with",
-        triples_factory=result.training
-    )
-    pred_df = predictions.df()
-    
-print(pred_df.head(10))
-
-# Alternative prediction method that should work across versions
+# Fixed prediction function
 def get_predictions(model, head, relation, triples_factory, k=10):
-    """Alternative method to get predictions"""
-    # Get all entity IDs
+    """Get top-k predictions for (head, relation, ?)"""
+    # Get mapping dictionaries
     entity_to_id = triples_factory.entity_to_id
     relation_to_id = triples_factory.relation_to_id
     
@@ -112,35 +88,80 @@ def get_predictions(model, head, relation, triples_factory, k=10):
     with torch.no_grad():
         scores = model.score_hrt(batch)
     
-    # Convert to dataframe
-    scores_np = scores.numpy()
+    # Convert to 1D numpy array
+    scores_np = scores.cpu().numpy().flatten()  # Ensure it's 1-dimensional
     entities = list(entity_to_id.keys())
     
+    # Create DataFrame
     result_df = pd.DataFrame({
         'tail_label': entities,
         'score': scores_np
     })
     
-    # Sort by score (descending)
-    result_df = result_df.sort_values('score', ascending=False)
-    
-    return result_df.head(k)
+    # Sort by score (descending) and return top k
+    return result_df.sort_values('score', ascending=False).head(k)
 
-# Get predictions using alternative method
-print("\nAlternative method - Predicted disease associations for BRCA1:")
+# Get predictions for BRCA1 gene associations
+print("\nPredicted disease associations for BRCA1:")
 try:
-    import torch
-    pred_df_alt = get_predictions(
+    pred_df = get_predictions(
         result.model, 
         "BRCA1", 
         "associated_with", 
         result.training
     )
-    print(pred_df_alt.head(10))
-except ImportError:
-    print("PyTorch not available for alternative method")
+    print(pred_df)
+except Exception as e:
+    print(f"Error getting predictions: {e}")
+
+# Try alternative prediction approach
+try:
+    # Simple approach: use the model's prediction methods directly
+    from pykeen.models import predict_target
+    
+    predictions = predict_target(
+        model=result.model,
+        head="BRCA1",
+        relation="associated_with",
+        triples_factory=result.training
+    )
+    
+    print("\nUsing predict_target:")
+    print(predictions.df.head(10))
+    
+except Exception as e:
+    print(f"\nError with predict_target: {e}")
 
 # Save the model for future use
 result.save_to_directory('./drug_discovery_model')
-
 print("\nModel saved to './drug_discovery_model/'")
+
+# Additional: Show some example predictions
+print("\nExample predictions:")
+diseases_to_predict = ["BRCA1", "TP53", "EGFR"]
+for gene in diseases_to_predict:
+    try:
+        predictions = get_predictions(
+            result.model, 
+            gene, 
+            "associated_with", 
+            result.training,
+            k=5
+        )
+        print(f"\nTop diseases associated with {gene}:")
+        for _, row in predictions.iterrows():
+            print(f"  {row['tail_label']}: {row['score']:.4f}")
+    except Exception as e:
+        print(f"Error predicting for {gene}: {e}")
+        continue
+
+# Show model performance metrics
+print(f"\nModel Performance:")
+print(f"Training loss: {result.losses[-1] if result.losses else 'N/A'}")
+print(f"Number of training epochs: {len(result.losses) if result.losses else 'N/A'}")
+
+# Show what diseases are already known to be associated with BRCA1
+print(f"\nKnown associations for BRCA1:")
+known_associations = [(h, r, t) for h, r, t in triples if h == "BRCA1" and r == "associated_with"]
+for h, r, t in known_associations:
+    print(f"  {h} {r} {t}")
